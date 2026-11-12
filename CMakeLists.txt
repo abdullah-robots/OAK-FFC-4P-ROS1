@@ -1,85 +1,50 @@
-cmake_minimum_required (VERSION 3.10.2)  # CMake version in Ubuntu 18.04 LTS
-project(ros1_oak_ffc_sync VERSION 1.0.0 LANGUAGES CXX C)
+cmake_minimum_required(VERSION 3.16)  # CMake version in Ubuntu 22.04 LTS is 3.22
+project(oak_ffc_sync VERSION 1.0.0 LANGUAGES CXX C)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-## is used, also find other catkin packages
-if(POLICY CMP0057)
-    cmake_policy(SET CMP0057 NEW)
-endif()
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic -Wno-deprecated-declarations -Wno-maybe-uninitialized)
 endif()
 
-set(_opencv_version 4)
-find_package(OpenCV 4 QUIET COMPONENTS imgproc highgui)
-if(NOT OpenCV_FOUND)
-  set(_opencv_version 3)
-  find_package(OpenCV 3 REQUIRED COMPONENTS imgproc highgui)
-endif()
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(camera_info_manager REQUIRED)
+find_package(image_transport REQUIRED)
+find_package(depthai_ros_msgs REQUIRED)
+find_package(depthai_bridge REQUIRED)
+find_package(depthai CONFIG REQUIRED)
+find_package(OpenCV 4 REQUIRED COMPONENTS imgproc highgui)
 
-find_package(catkin REQUIRED COMPONENTS
-  camera_info_manager
-  depthai_ros_msgs
-  roscpp
+add_executable(oak_ffc_sync src/oak_ffc_sync_publisher.cpp)
+target_include_directories(oak_ffc_sync PRIVATE ${OpenCV_INCLUDE_DIRS})
+ament_target_dependencies(oak_ffc_sync
+  rclcpp
   sensor_msgs
   std_msgs
   cv_bridge
-  vision_msgs
+  camera_info_manager
+  image_transport
+  depthai_ros_msgs
   depthai_bridge
-  message_filters
-  nodelet
 )
-find_package(depthai CONFIG REQUIRED)
-
-catkin_package(
-  LIBRARIES ${PROJECT_NAME}
-  CATKIN_DEPENDS depthai_ros_msgs roscpp sensor_msgs std_msgs camera_info_manager depthai_bridge vision_msgs cv_bridge message_filters
-  DEPENDS
-  OpenCV
+target_link_libraries(oak_ffc_sync
+  depthai::core
+  opencv_imgproc
+  opencv_highgui
 )
 
-macro(dai_add_node node_name node_src)
-    add_executable("${node_name}" "${node_src}")
-    
-    add_dependencies("${node_name}"
-      ${catkin_EXPORTED_TARGETS} 
-      ${${PROJECT_NAME}_EXPORTED_TARGETS}
-    )
-
-    target_link_libraries("${node_name}" 
-      ${catkin_LIBRARIES}
-      depthai::core
-      opencv_imgproc
-      opencv_highgui
-    )
-    
-endmacro() 
-
-## Specify additional locations of header files
-## Your package locations should be listed before other locations
-include_directories(
-  include
-  ${catkin_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIRS}
+install(TARGETS oak_ffc_sync
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
-dai_add_node(oak_ffc_sync src/oak_ffc_sync_publisher.cpp)
-
-## Install these nodes
-install(TARGETS
-        oak_ffc_sync
-        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+install(DIRECTORY launch params rviz
+  DESTINATION share/${PROJECT_NAME}
 )
 
-install(DIRECTORY params DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY rviz DESTINATION share/${PROJECT_NAME})
-install(DIRECTORY launch/
-DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
-PATTERN ".svn" EXCLUDE
-)
-install(FILES nodelet_plugins.xml
-      DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+ament_package()

@@ -1,20 +1,24 @@
 #include <map>
+#include <memory>
+#include <string>
+#include <tuple>
 #include <vector>
 
-#include "camera_info_manager/camera_info_manager.h"
-#include "ros/node_handle.h"
-#include "sensor_msgs/Image.h"
-#include "stereo_msgs/DisparityImage.h"
+#include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/image.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 
-// Inludes common necessary includes for development using depthai library
+// Includes common necessary includes for development using depthai library
 #include "depthai/device/DataQueue.hpp"
 #include "depthai/device/Device.hpp"
 #include "depthai/pipeline/Pipeline.hpp"
 #include "depthai/pipeline/node/ColorCamera.hpp"
-#include "depthai/pipeline/node/StereoDepth.hpp"
+#include "depthai/pipeline/node/IMU.hpp"
+#include "depthai/pipeline/node/MonoCamera.hpp"
+#include "depthai/pipeline/node/Script.hpp"
+#include "depthai/pipeline/node/Sync.hpp"
 #include "depthai/pipeline/node/XLinkOut.hpp"
 #include "depthai_bridge/BridgePublisher.hpp"
-#include "depthai_bridge/DisparityConverter.hpp"
 #include "depthai_bridge/ImageConverter.hpp"
 #include "depthai_bridge/ImuConverter.hpp"
 #include "SyncBridgePublisher.hpp"
@@ -176,28 +180,20 @@ else:
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "oak_ffc_sync");
-    ros::NodeHandle pnh("~");
+    rclcpp::init(argc, argv);
+    auto node = rclcpp::Node::make_shared("oak_ffc_sync");
 
     dai::Pipeline pipeline;
-    int width, height;
-    std::string tfPrefix, camera_type = "color";
-    std::string cameraParamUri;
-    int badParams = 0;
-    std::string resolution = "1200p";
+    int width = 0, height = 0;
 
-    badParams += !pnh.getParam("camera_param_uri", cameraParamUri);
-    badParams += !pnh.getParam("tf_prefix", tfPrefix);
-    badParams += !pnh.getParam("camera_type", camera_type);
-    badParams += !pnh.getParam("resolution", resolution);
-    badParams += !pnh.getParam("auto_exposure_enable", auto_exposure_enable);
-    badParams += !pnh.getParam("exposure_time", exposure_time);
-    badParams += !pnh.getParam("iso", iso);
-
-    if(badParams > 0) {
-        std::cout << " Bad parameters -> " << badParams << std::endl;
-        throw std::runtime_error("Couldn't find %d of the parameters");
-    }
+    // Same parameters as the ROS1 driver; the defaults match oak_ffc_sync.launch.py
+    const std::string tfPrefix = node->declare_parameter<std::string>("tf_prefix", "oak");
+    const std::string cameraParamUri = node->declare_parameter<std::string>("camera_param_uri", "package://oak_ffc_sync/params/ffc");
+    const std::string camera_type = node->declare_parameter<std::string>("camera_type", "color");
+    const std::string resolution = node->declare_parameter<std::string>("resolution", "1200p");
+    auto_exposure_enable = node->declare_parameter<bool>("auto_exposure_enable", false);
+    exposure_time = node->declare_parameter<int>("exposure_time", 12000);
+    iso = node->declare_parameter<int>("iso", 160);
 
     std::tie(pipeline, width, height) = createPipeline(camera_type, resolution);
 
@@ -215,46 +211,39 @@ int main(int argc, char** argv)
 
     auto imuQueue = device.getOutputQueue("imu", FPS, false);
     dai::rosBridge::ImuConverter imuConverter(tfPrefix + "_imu_frame", dai::ros::ImuSyncMethod::COPY, 0, 0, 0, 0, true);
-    dai::rosBridge::BridgePublisher<sensor_msgs::Imu, dai::IMUData> imuPublish(
+    dai::rosBridge::BridgePublisher<sensor_msgs::msg::Imu, dai::IMUData> imuPublish(
         imuQueue,
-        pnh,
-        std::string("imu"),
+        node,
+        std::string("~/imu"),
         std::bind(&dai::rosBridge::ImuConverter::toRosMsg, &imuConverter, std::placeholders::_1, std::placeholders::_2),
-        FPS
+        rclcpp::QoS(FPS)
     );
     imuPublish.addPublisherCallback();
 
-    std::map<std::string, std::string> rosTocips = {
-        {"CAM_A", "CAM_A/image"},
-        {"CAM_B", "CAM_B/image"},
-        {"CAM_C", "CAM_C/image"},
-        {"CAM_D", "CAM_D/image"}
+    std::map<std::string, std::string> rosTopics = {
+        {"CAM_A", "~/CAM_A/image"},
+        {"CAM_B", "~/CAM_B/image"},
+        {"CAM_C", "~/CAM_C/image"},
+        {"CAM_D", "~/CAM_D/image"}
     };
 
     auto syncQueue = device.getOutputQueue("sync", FPS, false);
-    std::unique_ptr<dai::rosBridge::ImageConverter> converter = std::make_unique<dai::rosBridge::ImageConverter>(tfPrefix + "_rgb_camera_optical_frame", true);
+    auto converter = std::make_unique<dai::rosBridge::ImageConverter>(tfPrefix + "_rgb_camera_optical_frame", true);
+    auto convertFunc = std::bind(&dai::rosBridge::ImageConverter::toRosMsg, converter.get(), std::placeholders::_1, std::placeholders::_2);
+    std::unique_ptr<dai::rosBridge::SyncBridgePublisher<sensor_msgs::msg::Image>> camPublish;
     try {
+        // Camera info from the device calibration (CAM_A), used for all four cameras
         auto cameraInfo = converter->calibrationToCameraInfo(calibrationHandler, dai::CameraBoardSocket::CAM_A, width, height);
-        dai::rosBridge::SyncBridgePublisher<sensor_msgs::Image> camPublish(
-                        syncQueue,
-                        pnh,
-                        rosTocips,
-                        std::bind(&dai::rosBridge::ImageConverter::toRosMsg, converter.get(), std::placeholders::_1, std::placeholders::_2),
-                        FPS,
-                        cameraInfo);
-        camPublish.startPublisherThread();
+        camPublish = std::make_unique<dai::rosBridge::SyncBridgePublisher<sensor_msgs::msg::Image>>(
+            syncQueue, node, rosTopics, convertFunc, FPS, cameraInfo);
     } catch(const std::exception& e) {
-        std::cerr << "\033[31m" << "[warning] The camera is not calibrated, please calibrate it before use!" << "\033[0m" << '\n';
-        dai::rosBridge::SyncBridgePublisher<sensor_msgs::Image> camPublish(
-                        syncQueue,
-                        pnh,
-                        rosTocips,
-                        std::bind(&dai::rosBridge::ImageConverter::toRosMsg, converter.get(), std::placeholders::_1, std::placeholders::_2),
-                        FPS,
-                        color_url);
-        camPublish.startPublisherThread();
+        RCLCPP_WARN(node->get_logger(), "The camera is not calibrated, please calibrate it before use! Using %s", color_url.c_str());
+        camPublish = std::make_unique<dai::rosBridge::SyncBridgePublisher<sensor_msgs::msg::Image>>(
+            syncQueue, node, rosTopics, convertFunc, FPS, color_url);
     }
+    camPublish->startPublisherThread();
 
-    ros::spin();
+    rclcpp::spin(node);
+    rclcpp::shutdown();
     return 0;
 }
